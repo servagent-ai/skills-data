@@ -1,0 +1,98 @@
+name: Validate & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Validate skills.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check JSON is valid
+        run: python3 -c "import json; data=json.load(open('data/skills.json')); print(f'✓ {len(data)} skills, valid JSON')"
+
+      - name: Check required fields
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          data = json.load(open('data/skills.json'))
+          required = ['id', 'name', 'description', 'category']
+          errors = []
+          for i, skill in enumerate(data):
+              for f in required:
+                  if not skill.get(f):
+                      errors.append(f"[{i}] missing field: {f}")
+          if errors:
+              for e in errors[:20]:
+                  print(e)
+              sys.exit(1)
+          print(f'✓ All {len(data)} skills have required fields')
+          EOF
+
+      - name: Print stats
+        run: |
+          python3 - <<'EOF'
+          import json
+          from collections import Counter
+          data = json.load(open('data/skills.json'))
+          cats = Counter(s.get('category','unknown') for s in data)
+          print(f"Total: {len(data)} skills")
+          print("Top categories:")
+          for cat, count in cats.most_common(10):
+              print(f"  {cat}: {count}")
+          EOF
+
+  deploy:
+    name: Upload to production
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload skills to ServAgent
+        run: |
+          python3 - <<'EOF'
+          import json, urllib.request, urllib.error, os, sys
+
+          api_url = os.environ.get('SERVAGENT_API_URL', 'https://servagent.ai')
+          api_key = os.environ.get('SERVAGENT_API_KEY', '')
+          data = json.load(open('data/skills.json'))
+
+          req = urllib.request.Request(
+              f"{api_url}/api/v1/admin/tools/import",
+              data=json.dumps(data).encode(),
+              headers={
+                  'Content-Type': 'application/json',
+                  'Authorization': f'Bearer {api_key}',
+              },
+              method='POST'
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=120) as res:
+                  result = json.loads(res.read())
+                  print(f"✓ Imported: added={result['data']['added']} updated={result['data']['updated']} skipped={result['data']['skipped']}")
+          except urllib.error.HTTPError as e:
+              body = e.read().decode()
+              print(f"✗ Upload failed: {e.code} {body}")
+              sys.exit(1)
+          EOF
+        env:
+          SERVAGENT_API_URL: https://servagent.ai
+          SERVAGENT_API_KEY: ${{ secrets.SERVAGENT_API_KEY }}
+
+      - name: Verify
+        run: |
+          sleep 3
+          python3 -c "
+          import urllib.request, json
+          res = urllib.request.urlopen('https://servagent.ai/api/v1/health')
+          d = json.loads(res.read())
+          assert d['status'] == 'healthy', f'unhealthy: {d}'
+          print('✓ Production healthy')
+          "
