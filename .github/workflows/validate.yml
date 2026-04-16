@@ -63,22 +63,26 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Upload skills via SSH
+      - name: Upload skills via SSH tunnel
         run: |
-          # Copy skills.json to server
-          scp -i ~/.ssh/deploy_key \
-            data/skills.json \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/skills-import.json
-
-          # Import via local API call on server
-          ssh -i ~/.ssh/deploy_key \
+          # Open SSH tunnel: local 18787 → server localhost:8787
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            -L 18787:localhost:8787 \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            "curl -sf -X POST http://localhost:8787/api/v1/admin/tools/import \
-               -H 'Content-Type: application/json' \
-               -H 'Authorization: Bearer ${{ secrets.SERVAGENT_API_KEY }}' \
-               -d @/tmp/skills-import.json \
-               | python3 -c \"import sys,json; d=json.load(sys.stdin); print(f'✓ added={d[\\\"data\\\"][\\\"added\\\"]} updated={d[\\\"data\\\"][\\\"updated\\\"]} skipped={d[\\\"data\\\"][\\\"skipped\\\"]} total={d[\\\"data\\\"][\\\"total\\\"]}')\" \
-            && rm /tmp/skills-import.json"
+            -fN -o ExitOnForwardFailure=yes
+          sleep 2
+          # Call API locally through tunnel
+          RESULT=$(curl -sf -X POST http://localhost:18787/api/v1/admin/tools/import \
+            -H 'Content-Type: application/json' \
+            -H 'Authorization: Bearer ${{ secrets.SERVAGENT_API_KEY }}' \
+            -d @data/skills.json)
+          echo "$RESULT"
+          echo "$RESULT" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          data = d['data']
+          print(f'✓ added={data[\"added\"]} updated={data[\"updated\"]} skipped={data[\"skipped\"]} total={data[\"total\"]}')
+          "
 
       - name: Verify
         run: |
