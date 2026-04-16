@@ -52,48 +52,36 @@ jobs:
     name: Upload to production
     needs: validate
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload skills to ServAgent
+      - name: Setup SSH
         run: |
-          python3 - <<'EOF'
-          import json, urllib.request, urllib.error, os, sys
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
 
-          api_url = os.environ.get('SERVAGENT_API_URL', 'https://servagent.ai')
-          api_key = os.environ.get('SERVAGENT_API_KEY', '')
-          data = json.load(open('data/skills.json'))
+      - name: Upload skills via SSH
+        run: |
+          # Copy skills.json to server
+          scp -i ~/.ssh/deploy_key \
+            data/skills.json \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/skills-import.json
 
-          req = urllib.request.Request(
-              f"{api_url}/api/v1/admin/tools/import",
-              data=json.dumps(data).encode(),
-              headers={
-                  'Content-Type': 'application/json',
-                  'Authorization': f'Bearer {api_key}',
-              },
-              method='POST'
-          )
-          try:
-              with urllib.request.urlopen(req, timeout=120) as res:
-                  result = json.loads(res.read())
-                  print(f"✓ Imported: added={result['data']['added']} updated={result['data']['updated']} skipped={result['data']['skipped']}")
-          except urllib.error.HTTPError as e:
-              body = e.read().decode()
-              print(f"✗ Upload failed: {e.code} {body}")
-              sys.exit(1)
-          EOF
-        env:
-          SERVAGENT_API_URL: https://servagent.ai
-          SERVAGENT_API_KEY: ${{ secrets.SERVAGENT_API_KEY }}
+          # Import via local API call on server
+          ssh -i ~/.ssh/deploy_key \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "curl -sf -X POST http://localhost:8787/api/v1/admin/tools/import \
+               -H 'Content-Type: application/json' \
+               -H 'Authorization: Bearer ${{ secrets.SERVAGENT_API_KEY }}' \
+               -d @/tmp/skills-import.json \
+               | python3 -c \"import sys,json; d=json.load(sys.stdin); print(f'✓ added={d[\\\"data\\\"][\\\"added\\\"]} updated={d[\\\"data\\\"][\\\"updated\\\"]} skipped={d[\\\"data\\\"][\\\"skipped\\\"]} total={d[\\\"data\\\"][\\\"total\\\"]}')\" \
+            && rm /tmp/skills-import.json"
 
       - name: Verify
         run: |
           sleep 3
-          python3 -c "
-          import urllib.request, json
-          res = urllib.request.urlopen('https://servagent.ai/api/v1/health')
-          d = json.loads(res.read())
-          assert d['status'] == 'healthy', f'unhealthy: {d}'
-          print('✓ Production healthy')
-          "
+          curl -sf https://servagent.ai/api/v1/health \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['status']=='healthy'; print('✓ Production healthy')"
